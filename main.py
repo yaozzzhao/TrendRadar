@@ -880,7 +880,7 @@ class ReportGenerator:
         smtp_server = CONFIG["EMAIL_SMTP_SERVER"]
         smtp_port = CONFIG["EMAIL_SMTP_PORT"]
         username = CONFIG["EMAIL_USERNAME"]
-        password = CONFIG["EMAIL_PASSWORD"]
+        password = os.environ.get("EMAIL_PASSWORD", CONFIG["EMAIL_PASSWORD"])
         receiver = receiver or CONFIG["EMAIL_RECEIVER"]
 
         msg = MIMEText(content, "html", "utf-8")
