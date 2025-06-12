@@ -11,6 +11,9 @@ import os
 
 import requests
 import pytz
+import smtplib
+from email.mime.text import MIMEText
+from email.header import Header
 
 # 配置常量
 CONFIG = {
@@ -22,6 +25,11 @@ CONFIG = {
     "DEFAULT_PROXY": "http://127.0.0.1:10086",
     "CONTINUE_WITHOUT_FEISHU": True,  # 控制在没有飞书 webhook URL 时是否继续执行爬虫, 如果 True ,会依然进行爬虫行为，并在 github 上持续的生成爬取的新闻数据
     "FEISHU_WEBHOOK_URL": "",  # 飞书机器人的 webhook URL，大概长这样：https://www.feishu.cn/flow/api/trigger-webhook/xxxx， 默认为空，推荐通过GitHub Secrets设置
+    "EMAIL_SMTP_SERVER": "smtp.gmail.com",
+    "EMAIL_SMTP_PORT": 465,
+    "EMAIL_USERNAME": "yao.zhao@gmail.com",
+    "EMAIL_PASSWORD": "", #邮箱SMTP授权码，默认为空，推荐通过GitHub Secrets设置
+    "EMAIL_RECEIVER": "yaozzzhao@outlook.com",
 }
 
 
@@ -863,122 +871,32 @@ class ReportGenerator:
                     .replace("'", "&#x27;"))
 
     @staticmethod
-    def send_to_feishu(
-        stats: List[Dict],
-        failed_ids: Optional[List] = None,
-        report_type: str = "单次爬取",
+    def send_to_email(
+        subject: str,
+        content: str,
+        receiver: Optional[str] = None,
     ) -> bool:
-        """发送数据到飞书"""
-        webhook_url = os.environ.get("FEISHU_WEBHOOK_URL", CONFIG["FEISHU_WEBHOOK_URL"])
+        """发送邮件"""
+        smtp_server = CONFIG["EMAIL_SMTP_SERVER"]
+        smtp_port = CONFIG["EMAIL_SMTP_PORT"]
+        username = CONFIG["EMAIL_USERNAME"]
+        password = CONFIG["EMAIL_PASSWORD"]
+        receiver = receiver or CONFIG["EMAIL_RECEIVER"]
 
-        if not webhook_url:
-            print(f"警告: FEISHU_WEBHOOK_URL未设置，跳过飞书通知")
-            return False
-
-        headers = {"Content-Type": "application/json"}
-        total_titles = sum(len(stat["titles"]) for stat in stats if stat["count"] > 0)
-        text_content = ReportGenerator._build_feishu_content(stats, failed_ids)
-
-        now = TimeHelper.get_beijing_time()
-        payload = {
-            "msg_type": "text",
-            "content": {
-                "total_titles": total_titles,
-                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "report_type": report_type,
-                "text": text_content,
-            },
-        }
+        msg = MIMEText(content, "html", "utf-8")
+        msg["Subject"] = Header(subject, "utf-8")
+        msg["From"] = username
+        msg["To"] = receiver
 
         try:
-            response = requests.post(webhook_url, headers=headers, json=payload)
-            if response.status_code == 200:
-                print(f"数据发送到飞书成功 [{report_type}]")
-                return True
-            else:
-                print(f"发送到飞书失败 [{report_type}]，状态码：{response.status_code}，响应：{response.text}")
-                return False
+            with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
+                server.login(username, password)
+                server.sendmail(username, [receiver], msg.as_string())
+            print(f"邮件已发送到 {receiver}")
+            return True
         except Exception as e:
-            print(f"发送到飞书时出错 [{report_type}]：{e}")
+            print(f"发送邮件失败: {e}")
             return False
-
-    @staticmethod
-    def _build_feishu_content(stats: List[Dict], failed_ids: Optional[List] = None) -> str:
-        """构建飞书消息内容"""
-        text_content = ""
-        filtered_stats = [stat for stat in stats if stat["count"] > 0]
-
-        if filtered_stats:
-            text_content += "📊 **热点词汇统计**\n\n"
-
-        total_count = len(filtered_stats)
-
-        for i, stat in enumerate(filtered_stats):
-            word = stat["word"]
-            count = stat["count"]
-
-            sequence_display = f"<font color='grey'>[{i + 1}/{total_count}]</font>"
-
-            # 频次颜色分级
-            if count >= 10:
-                text_content += f"🔥 {sequence_display} **{word}** : <font color='red'>{count}</font> 条\n\n"
-            elif count >= 5:
-                text_content += f"📈 {sequence_display} **{word}** : <font color='orange'>{count}</font> 条\n\n"
-            else:
-                text_content += f"📌 {sequence_display} **{word}** : {count} 条\n\n"
-
-            # 标题列表
-            for j, title_data in enumerate(stat["titles"], 1):
-                title = title_data["title"]
-                source_alias = title_data["source_alias"]
-                time_display = title_data["time_display"]
-                count_info = title_data["count"]
-                ranks = title_data["ranks"]
-                rank_threshold = title_data["rank_threshold"]
-                url = title_data.get("url", "")
-                mobile_url = title_data.get("mobileUrl", "")
-
-                rank_display = StatisticsCalculator._format_rank_for_feishu(ranks, rank_threshold)
-
-                link_url = mobile_url or url
-                if link_url:
-                    formatted_title = f"[{title}]({link_url})"
-                else:
-                    formatted_title = title
-
-                text_content += f"  {j}. <font color='grey'>[{source_alias}]</font> {formatted_title}"
-            
-                if rank_display:
-                    text_content += f" {rank_display}"
-                if time_display:
-                    text_content += f" <font color='grey'>- {time_display}</font>"
-                if count_info > 1:
-                    text_content += f" <font color='green'>({count_info}次)</font>"
-                text_content += "\n"
-
-                if j < len(stat["titles"]):
-                    text_content += "\n"
-
-            # 分割线
-            if i < len(filtered_stats) - 1:
-                text_content += f"\n{CONFIG['FEISHU_SEPARATOR']}\n\n"
-
-        if not text_content:
-            text_content = "📭 暂无匹配的热点词汇\n\n"
-
-        # 失败平台信息
-        if failed_ids and len(failed_ids) > 0:
-            if text_content and "暂无匹配" not in text_content:
-                text_content += f"\n{CONFIG['FEISHU_SEPARATOR']}\n\n"
-
-            text_content += "⚠️ **数据获取失败的平台：**\n\n"
-            for i, id_value in enumerate(failed_ids, 1):
-                text_content += f"  • <font color='red'>{id_value}</font>\n"
-
-        now = TimeHelper.get_beijing_time()
-        text_content += f"\n\n<font color='grey'>更新时间：{now.strftime('%Y-%m-%d %H:%M:%S')}</font>"
-
-        return text_content
 
 
 class NewsAnalyzer:
@@ -1033,9 +951,6 @@ class NewsAnalyzer:
             stats, total_titles, is_daily=True
         )
         print(f"当日HTML统计报告已生成: {html_file}")
-
-        if self.feishu_report_type in ["daily", "both"]:
-            ReportGenerator.send_to_feishu(stats, [], "当日汇总")
 
         return html_file
 
@@ -1113,9 +1028,9 @@ class NewsAnalyzer:
             id_to_alias, title_info, self.rank_threshold,
         )
 
-        # 发送报告
-        if self.feishu_report_type in ["current", "both"]:
-            ReportGenerator.send_to_feishu(stats, failed_ids, "单次爬取")
+        # 生成 HTML 内容
+        html_content = ReportGenerator._create_html_content(stats, total_titles, failed_ids)
+        ReportGenerator.send_to_email("热点词汇统计报告", html_content)
 
         html_file = ReportGenerator.generate_html_report(stats, total_titles, failed_ids)
         print(f"HTML报告已生成: {html_file}")
